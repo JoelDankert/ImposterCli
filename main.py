@@ -132,6 +132,10 @@ def set_box_style(style: BoxStyle) -> None:
 
 
 def is_current_imposter() -> bool:
+    if ui_state.imposter_index == -1:
+        if ui_state.all_imposter_except_first and ui_state.player_count > 1:
+            return ui_state.current_player != 0
+        return True
     if ui_state.all_imposter_except_first:
         if ui_state.player_count > 1:
             return ui_state.current_player != 0
@@ -487,8 +491,11 @@ def assign_imposter() -> None:
     ui_state.all_imposter_except_first = False
     roll = random.randint(1, 100)
     if roll <= ui_state.imposter_all_chance:
-        ui_state.imposter_index = None
-        ui_state.all_imposter_except_first = True
+        include_first = ui_state.word_options_count <= 1 and not (
+            ui_state.selected_mode and ui_state.selected_mode.source == "player"
+        )
+        ui_state.imposter_index = -1
+        ui_state.all_imposter_except_first = not include_first and ui_state.player_count > 1
         return
     if ui_state.selected_mode and ui_state.selected_mode.source == "player":
         ui_state.imposter_index = random.randint(1, ui_state.player_count - 1)
