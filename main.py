@@ -64,6 +64,8 @@ class UIState:
     scroll_block_until: float = 0.0
     simple_candidates: list[str] = None  # type: ignore
     simple_index: int = 0
+    simple_hold_started: bool = False
+    simple_hold_until: float = 0.0
 
 
 message_box = MessageBox()
@@ -206,40 +208,21 @@ def draw_message_box(stdscr: curses.window, now: float, highlight_word: Optional
     start_y = max(1, (h - box_height) // 2)
     start_x = max(1, (w - box_width) // 2)
 
-    # Arrow indicator during mode selection or simple random browse
+    # Arrow indicators during mode selection or simple random browse (single arrows only)
     if ui_state.screen in ("mode_select", "random_simple"):
-        arrow = "↑"
-        arrow_y = start_y - 2
-        if arrow_y >= 0:
-            arrow_x = start_x + (box_width - len(arrow)) // 2
-            indicator_attr = curses.color_pair(2) | curses.A_BOLD
+        indicator_attr = curses.color_pair(2) | curses.A_BOLD
+        arrow_up = "↑"
+        arrow_down = "↓"
+        arrow_x = start_x + (box_width - 1) // 2
+        arrow_up_y = start_y - 2
+        if arrow_up_y >= 0:
             stdscr.attrset(indicator_attr)
-            safe_addstr(stdscr, arrow_y, arrow_x, arrow)
-            if ui_state.screen == "random_simple" and ui_state.simple_candidates:
-                total = len(ui_state.simple_candidates)
-                max_preview = min(2, max(0, total - 1))
-                preview_words = []
-                for step in range(1, max_preview + 1):
-                    idx = (ui_state.simple_index + step) % total
-                    preview_words.append(ui_state.simple_candidates[idx])
-                preview_y = arrow_y - 1
-                for i, word in enumerate(preview_words):
-                    if preview_y < 0:
-                        break
-                    render_word = word.upper()[: box_width - 2]
-                    word_x = start_x + (box_width - len(render_word)) // 2
-                    stdscr.attrset(indicator_attr)
-                    safe_addstr(stdscr, preview_y, word_x, render_word)
-                    preview_y -= 1
-                    if i != len(preview_words) - 1 and preview_y >= 0:
-                        safe_addstr(stdscr, preview_y, arrow_x, arrow)
-                        preview_y -= 1
-                if preview_words and preview_y >= 0:
-                    stdscr.attrset(indicator_attr)
-                    safe_addstr(stdscr, preview_y, arrow_x, arrow)
-                    if preview_y - 1 >= 0:
-                        dots_x = start_x + (box_width - 3) // 2
-                        safe_addstr(stdscr, preview_y - 1, dots_x, "...")
+            safe_addstr(stdscr, arrow_up_y, arrow_x, arrow_up)
+        if ui_state.screen == "random_simple":
+            arrow_down_y = start_y + box_height + 1
+            if arrow_down_y < h:
+                stdscr.attrset(indicator_attr)
+                safe_addstr(stdscr, arrow_down_y, arrow_x, arrow_down)
 
     # Reveal countdown indicator
     if ui_state.screen == "reveal":
@@ -311,6 +294,13 @@ def render(stdscr: curses.window) -> None:
     stdscr.bkgd(" ", curses.color_pair(1) | curses.A_DIM)
     now = time.monotonic()
     highlight_word = None
+    if (
+        ui_state.screen == "random_simple"
+        and ui_state.simple_hold_started
+        and ui_state.simple_hold_until > 0
+    ):
+        remaining = max(0, int(ui_state.simple_hold_until - now + 0.999))
+        set_message_box_text(f"Auswahl in {remaining} sek")
     if ui_state.screen == "random_pick" and ui_state.random_filter:
         highlight_word = best_random_choice()
     if ui_state.screen == "reveal" and is_current_imposter():
@@ -369,6 +359,8 @@ def reset_idle() -> None:
     ui_state.handoff_until = 0.0
     ui_state.handoff_advance = True
     ui_state.handoff_pending_action = ""
+    ui_state.simple_hold_started = False
+    ui_state.simple_hold_until = 0.0
     ui_state.random_candidates = []
     ui_state.random_filter = ""
     set_box_style(DEFAULT_STYLE)
@@ -540,7 +532,13 @@ def prepare_word_and_start() -> None:
         ui_state.chosen_word = choose_word_for_source(ui_state.selected_mode.source)
     ui_state.current_player = 0
     assign_imposter()
-    if ui_state.word_options_count > 1:
+    if (
+        ui_state.word_options_count > 1
+        and ui_state.player_count > 1
+        and ui_state.current_player == 0
+    ):
+        start_handoff(time.monotonic(), advance_after=True)
+    elif ui_state.word_options_count > 1:
         start_reveal(time.monotonic())
     else:
         start_waiting()
@@ -572,15 +570,23 @@ def start_random_simple() -> None:
     count = max(1, min(count, pool_size))
     ui_state.simple_candidates = random.sample(WORDS, count)
     ui_state.simple_index = 0
+    ui_state.simple_hold_started = False
+    ui_state.simple_hold_until = 0.0
     enter_random_simple()
 
 
-def enter_random_simple() -> None:
+def enter_random_simple(now: float | None = None) -> None:
+    if now is None:
+        now = time.monotonic()
     ui_state.screen = "random_simple"
     set_box_style(IMPOSTER_STYLE)
     word = ui_state.simple_candidates[ui_state.simple_index] if ui_state.simple_candidates else "..."
     set_message_box_title(word.upper())
-    set_message_box_text("runter zum Auswählen")
+    if ui_state.simple_hold_started and ui_state.simple_hold_until > 0:
+        remaining = max(0, int(ui_state.simple_hold_until - now + 0.999))
+        set_message_box_text(f"Auswahl in {remaining} sek")
+    else:
+        set_message_box_text("Scrollen zum Durchblättern")
 
 
 def best_random_choice() -> str:
@@ -653,10 +659,21 @@ def lock_random_simple_choice() -> None:
         ui_state.chosen_word = choose_word_for_source("random")
     else:
         ui_state.chosen_word = ui_state.simple_candidates[ui_state.simple_index]
+    ui_state.simple_hold_started = False
+    ui_state.simple_hold_until = 0.0
     prepare_word_and_start()
 
 
 def update_timers(now: float) -> None:
+    if (
+        ui_state.screen == "random_simple"
+        and ui_state.simple_hold_started
+        and ui_state.simple_hold_until > 0
+        and now >= ui_state.simple_hold_until
+    ):
+        lock_random_simple_choice()
+        return
+
     if ui_state.screen == "reveal" and now >= ui_state.reveal_until:
         if ui_state.current_player + 1 >= ui_state.player_count:
             advance_player()
@@ -701,13 +718,14 @@ def on_direction(direction: str) -> None:
         enter_modes()
         return
     if ui_state.screen == "random_simple":
-        if direction == GO_DIRECTION:
-            lock_random_simple_choice()
-        elif direction == BACK_DIRECTION:
+        if direction in (GO_DIRECTION, BACK_DIRECTION):
             length = len(ui_state.simple_candidates) if ui_state.simple_candidates else len(WORDS)
             length = max(1, length)
-            ui_state.simple_index = (ui_state.simple_index + 1) % length
-            enter_random_simple()
+            delta = 1 if direction == GO_DIRECTION else -1
+            ui_state.simple_index = (ui_state.simple_index + delta) % length
+            ui_state.simple_hold_started = True
+            ui_state.simple_hold_until = time.monotonic() + 5.0
+            enter_random_simple(time.monotonic())
         return
     if direction == GO_DIRECTION:
         if ui_state.screen == "idle":
