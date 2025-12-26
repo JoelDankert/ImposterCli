@@ -57,6 +57,8 @@ class UIState:
     countdown_until: float = 0.0
     reveal_until: float = 0.0
     handoff_until: float = 0.0
+    handoff_advance: bool = True
+    handoff_pending_action: str = ""
     random_candidates: list[str] = None  # type: ignore
     random_filter: str = ""
     scroll_block_until: float = 0.0
@@ -365,6 +367,8 @@ def reset_idle() -> None:
     ui_state.countdown_until = 0.0
     ui_state.reveal_until = 0.0
     ui_state.handoff_until = 0.0
+    ui_state.handoff_advance = True
+    ui_state.handoff_pending_action = ""
     ui_state.random_candidates = []
     ui_state.random_filter = ""
     set_box_style(DEFAULT_STYLE)
@@ -439,15 +443,17 @@ def select_mode() -> None:
         return
     ui_state.selected_mode = current
     set_box_style(current.style)
+    pending_action = ""
     if current.source == "player":
         ui_state.word_buffer = ""
-        enter_word_entry()
+        pending_action = "enter_word_entry"
     elif current.source == "random":
-        start_random_flow()
+        pending_action = "start_random_flow"
     elif current.source == "random_simple":
-        start_random_simple()
+        pending_action = "start_random_simple"
     else:
-        prepare_word_and_start()
+        pending_action = "prepare_word_and_start"
+    start_handoff(time.monotonic(), advance_after=False, pending_action=pending_action)
 
 
 def choose_word_for_source(source: str) -> str:
@@ -500,9 +506,11 @@ def start_reveal(now: float) -> None:
         set_message_box_text(ui_state.chosen_word or "mystery")
 
 
-def start_handoff(now: float) -> None:
+def start_handoff(now: float, advance_after: bool = True, pending_action: str = "") -> None:
     ui_state.screen = "handoff"
     ui_state.handoff_until = now + 3
+    ui_state.handoff_advance = advance_after
+    ui_state.handoff_pending_action = pending_action
     set_box_style(DEFAULT_STYLE)
     set_message_box_title("Weitergeben")
     set_message_box_text("Gebe das Gerät dem nächsten Spieler")
@@ -654,10 +662,24 @@ def update_timers(now: float) -> None:
             advance_player()
             ui_state.scroll_block_until = now + 1.0
         else:
-            start_handoff(now)
+            start_handoff(now, advance_after=True)
             ui_state.scroll_block_until = now + 1.0
     elif ui_state.screen == "handoff" and now >= ui_state.handoff_until:
-        advance_player()
+        if ui_state.handoff_pending_action:
+            action = ui_state.handoff_pending_action
+            ui_state.handoff_pending_action = ""
+            if action == "enter_word_entry":
+                enter_word_entry()
+            elif action == "start_random_flow":
+                start_random_flow()
+            elif action == "start_random_simple":
+                start_random_simple()
+            elif action == "prepare_word_and_start":
+                prepare_word_and_start()
+        elif ui_state.handoff_advance:
+            advance_player()
+        else:
+            start_waiting()
         ui_state.scroll_block_until = now + 1.0
 
 
@@ -671,8 +693,9 @@ def on_direction(direction: str) -> None:
         if ui_state.current_player + 1 >= ui_state.player_count:
             advance_player()
         else:
-            start_handoff(time.monotonic())
-            ui_state.scroll_block_until = time.monotonic() + 1.0
+            now = time.monotonic()
+            start_handoff(now, advance_after=True)
+            ui_state.scroll_block_until = now + 1.0
         return
     if ui_state.screen == "done":
         enter_modes()
