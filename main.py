@@ -43,9 +43,10 @@ class ScrollState:
 
 @dataclass
 class UIState:
-    screen: str = "idle"  # idle, player_input, word_count, confirm, mode_select, word_entry, random_pick, wait_scroll, reveal, handoff, done
+    screen: str = "idle"  # idle, player_input, word_count, imposter_percent, confirm, mode_select, word_entry, random_pick, wait_scroll, reveal, handoff, done
     input_buffer: str = ""
     word_count_buffer: str = ""
+    imposter_percent_buffer: str = ""
     player_count: int = 0
     word_options_count: int = 0
     word_buffer: str = ""
@@ -59,6 +60,8 @@ class UIState:
     handoff_until: float = 0.0
     handoff_advance: bool = True
     handoff_pending_action: str = ""
+    imposter_all_chance: int = 0
+    all_imposter_except_first: bool = False
     random_candidates: list[str] = None  # type: ignore
     random_filter: str = ""
     scroll_block_until: float = 0.0
@@ -129,6 +132,10 @@ def set_box_style(style: BoxStyle) -> None:
 
 
 def is_current_imposter() -> bool:
+    if ui_state.all_imposter_except_first:
+        if ui_state.player_count > 1:
+            return ui_state.current_player != 0
+        return True
     return ui_state.imposter_index is not None and ui_state.current_player == ui_state.imposter_index
 
 
@@ -347,6 +354,7 @@ def reset_idle() -> None:
     ui_state.screen = "idle"
     ui_state.input_buffer = ""
     ui_state.word_count_buffer = ""
+    ui_state.imposter_percent_buffer = ""
     ui_state.word_options_count = 0
     ui_state.word_buffer = ""
     ui_state.player_count = 0
@@ -359,6 +367,8 @@ def reset_idle() -> None:
     ui_state.handoff_until = 0.0
     ui_state.handoff_advance = True
     ui_state.handoff_pending_action = ""
+    ui_state.imposter_all_chance = 0
+    ui_state.all_imposter_except_first = False
     ui_state.simple_hold_started = False
     ui_state.simple_hold_until = 0.0
     ui_state.random_candidates = []
@@ -386,6 +396,16 @@ def enter_word_count_input() -> None:
     body = ui_state.word_count_buffer or "Zahl tippen..."
     set_message_box_title(title)
     set_message_box_text(body)
+    ui_state.imposter_percent_buffer = ui_state.imposter_percent_buffer or ""
+
+
+def enter_imposter_percent_input() -> None:
+    ui_state.screen = "imposter_percent"
+    set_box_style(DEFAULT_STYLE)
+    title = "Prozent: alle sind Imposter"
+    body = ui_state.imposter_percent_buffer or "0-100 eingeben"
+    set_message_box_title(title)
+    set_message_box_text(body)
 
 
 def enter_confirm() -> None:
@@ -398,10 +418,14 @@ def enter_confirm() -> None:
         ui_state.word_options_count = max(0, int(ui_state.word_count_buffer or "0"))
     except ValueError:
         ui_state.word_options_count = 0
+    try:
+        ui_state.imposter_all_chance = max(0, min(100, int(ui_state.imposter_percent_buffer or "0")))
+    except ValueError:
+        ui_state.imposter_all_chance = 0
     set_box_style(DEFAULT_STYLE)
     set_message_box_title("Passt")
     set_message_box_text(
-        f"{ui_state.player_count} Spieler, {ui_state.word_options_count} Optionen. Scrollen zum Start..."
+        f"{ui_state.player_count} Spieler, {ui_state.word_options_count} Optionen, {ui_state.imposter_all_chance}% alle Imposter. Scrollen zum Start..."
     )
 
 
@@ -458,6 +482,13 @@ def choose_word_for_source(source: str) -> str:
 def assign_imposter() -> None:
     if ui_state.player_count <= 1:
         ui_state.imposter_index = None
+        ui_state.all_imposter_except_first = False
+        return
+    ui_state.all_imposter_except_first = False
+    roll = random.randint(1, 100)
+    if roll <= ui_state.imposter_all_chance:
+        ui_state.imposter_index = None
+        ui_state.all_imposter_except_first = True
         return
     if ui_state.selected_mode and ui_state.selected_mode.source == "player":
         ui_state.imposter_index = random.randint(1, ui_state.player_count - 1)
@@ -734,6 +765,8 @@ def on_direction(direction: str) -> None:
             if ui_state.input_buffer:
                 enter_word_count_input()
         elif ui_state.screen == "word_count":
+            enter_imposter_percent_input()
+        elif ui_state.screen == "imposter_percent":
             enter_confirm()
         elif ui_state.screen == "confirm":
             enter_modes()
@@ -748,13 +781,15 @@ def on_direction(direction: str) -> None:
         if ui_state.screen == "player_input":
             reset_idle()
         elif ui_state.screen == "confirm":
-            enter_player_input()
+            enter_imposter_percent_input()
         elif ui_state.screen == "mode_select":
             show_mode(ui_state.mode_index - 1)
         elif ui_state.screen == "word_entry":
             enter_modes()
         elif ui_state.screen == "word_count":
             enter_player_input()
+        elif ui_state.screen == "imposter_percent":
+            enter_word_count_input()
         elif ui_state.screen == "random_pick":
             enter_modes()
 
@@ -806,6 +841,9 @@ def run(stdscr: curses.window) -> None:
             if ui_state.screen == "word_count":
                 handle_scroll(GO_DIRECTION, now)
                 continue
+            if ui_state.screen == "imposter_percent":
+                handle_scroll(GO_DIRECTION, now)
+                continue
             if ui_state.screen == "confirm":
                 handle_scroll(GO_DIRECTION, now)
                 continue
@@ -835,6 +873,15 @@ def run(stdscr: curses.window) -> None:
             if 48 <= ch <= 57:
                 ui_state.word_count_buffer += chr(ch)
                 enter_word_count_input()
+                continue
+        if ui_state.screen == "imposter_percent":
+            if ch in (curses.KEY_BACKSPACE, 127, 8):
+                ui_state.imposter_percent_buffer = ui_state.imposter_percent_buffer[:-1]
+                enter_imposter_percent_input()
+                continue
+            if 48 <= ch <= 57:
+                ui_state.imposter_percent_buffer += chr(ch)
+                enter_imposter_percent_input()
                 continue
         if ui_state.screen == "word_entry":
             if ch in (curses.KEY_BACKSPACE, 127, 8):
