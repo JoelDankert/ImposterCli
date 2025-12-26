@@ -43,7 +43,7 @@ class ScrollState:
 
 @dataclass
 class UIState:
-    screen: str = "idle"  # idle, player_input, word_count, confirm, mode_select, word_entry, random_pick, wait_scroll, reveal, done
+    screen: str = "idle"  # idle, player_input, word_count, confirm, mode_select, word_entry, random_pick, wait_scroll, reveal, handoff, done
     input_buffer: str = ""
     word_count_buffer: str = ""
     player_count: int = 0
@@ -56,6 +56,7 @@ class UIState:
     current_player: int = 0
     countdown_until: float = 0.0
     reveal_until: float = 0.0
+    handoff_until: float = 0.0
     random_candidates: list[str] = None  # type: ignore
     random_filter: str = ""
     scroll_block_until: float = 0.0
@@ -73,37 +74,18 @@ scroll_state = ScrollState()
 ui_state = UIState()
 
 # Treat events within this window as one continuous scroll.
-# Debounce scrolls for half a second to avoid double triggers.
-SCROLL_GAP_SECONDS = 0.50
-MIN_SCROLL_INTERVAL = 0.50
+# Debounce scrolls for eight-tenths of a second to avoid double triggers (wheel and arrows alike).
+SCROLL_BUFFER_SECONDS = 0.8
+SCROLL_GAP_SECONDS = SCROLL_BUFFER_SECONDS
+MIN_SCROLL_INTERVAL = SCROLL_BUFFER_SECONDS
 
 WORDS_PATH = Path(__file__).with_name("words.txt")
-
-DEFAULT_WORDS = [
-    "Apfel", "Banane", "Kirsche", "Drache", "Fels", "Gabel", "Hammer", "Insel", "Jagd",
-    "Koffer", "Lampe", "Messer", "Nadel", "Orgel", "Pinsel", "Quelle", "Rakete", "Schiff",
-    "Tasche", "Uhr", "Vogel", "Wal", "Xylofon", "Yacht", "Zahn", "Fenster", "Bruecke",
-    "Strasse", "Berg", "Tal", "Fluss", "See", "Wald", "Stadt", "Dorf", "Kirche", "Turm",
-    "Bank", "Schule", "Markt", "Haus", "Hof", "Garten", "Zaun", "Buch", "Heft", "Stift",
-    "Tisch", "Stuhl", "Sofa", "Bett", "Schrank", "Kiste", "Keller", "Dach", "Boden",
-    "Mauer", "Tuer", "Fensterbank", "Vorhang", "Teppich", "Bild", "Spiegel", "Lampe",
-    "Kerze", "Ofen", "Herd", "Pfanne", "Topf", "Loeffel", "Teller",
-    "Tasse", "Glas", "Flasche", "Becher", "Eimer", "Seil", "Kette", "Schluessel", "Schloss",
-    "Karte", "Plan", "Kompass", "Radio", "Telefon", "Computer", "Bildschirm", "Tastatur",
-    "Maus", "Drucker", "Kamera", "Foto", "Film", "Buehne", "Publikum", "Buchstabe",
-    "Wort", "Satz", "Sprache", "Stimme", "Lied", "Musik", "Trommel", "Gitarre", "Klavier",
-    "Geige", "Floete", "Trompete", "Saxofon", "Noten", "Takt", "Rhythmus", "Melodie",
-    "Farbe", "Form", "Linie", "Kreis", "Quadrat", "Dreieck", "Wuerfel", "Kugel",
-    "Gurkenkoenig", "Kekskrise", "Tanzbanane", "Chaoskrabbe", "Schnarchdrache",
-    "Sockenpirat", "Nudelorkan", "Pixelpapagei", "Kaffeesaurus", "Quatschkaktus",
-]
-
 
 def load_words(path: Path = WORDS_PATH) -> list[str]:
     try:
         raw_lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return DEFAULT_WORDS[:]
+        return []
     words: list[str] = []
     seen: set[str] = set()
     for line in raw_lines:
@@ -112,7 +94,7 @@ def load_words(path: Path = WORDS_PATH) -> list[str]:
             continue
         seen.add(word)
         words.append(word)
-    return words or DEFAULT_WORDS[:]
+    return words
 
 
 WORDS = load_words()
@@ -228,8 +210,34 @@ def draw_message_box(stdscr: curses.window, now: float, highlight_word: Optional
         arrow_y = start_y - 2
         if arrow_y >= 0:
             arrow_x = start_x + (box_width - len(arrow)) // 2
-            stdscr.attrset(curses.color_pair(2) | curses.A_BOLD)
+            indicator_attr = curses.color_pair(2) | curses.A_BOLD
+            stdscr.attrset(indicator_attr)
             safe_addstr(stdscr, arrow_y, arrow_x, arrow)
+            if ui_state.screen == "random_simple" and ui_state.simple_candidates:
+                total = len(ui_state.simple_candidates)
+                max_preview = min(2, max(0, total - 1))
+                preview_words = []
+                for step in range(1, max_preview + 1):
+                    idx = (ui_state.simple_index + step) % total
+                    preview_words.append(ui_state.simple_candidates[idx])
+                preview_y = arrow_y - 1
+                for i, word in enumerate(preview_words):
+                    if preview_y < 0:
+                        break
+                    render_word = word.upper()[: box_width - 2]
+                    word_x = start_x + (box_width - len(render_word)) // 2
+                    stdscr.attrset(indicator_attr)
+                    safe_addstr(stdscr, preview_y, word_x, render_word)
+                    preview_y -= 1
+                    if i != len(preview_words) - 1 and preview_y >= 0:
+                        safe_addstr(stdscr, preview_y, arrow_x, arrow)
+                        preview_y -= 1
+                if preview_words and preview_y >= 0:
+                    stdscr.attrset(indicator_attr)
+                    safe_addstr(stdscr, preview_y, arrow_x, arrow)
+                    if preview_y - 1 >= 0:
+                        dots_x = start_x + (box_width - 3) // 2
+                        safe_addstr(stdscr, preview_y - 1, dots_x, "...")
 
     # Reveal countdown indicator
     if ui_state.screen == "reveal":
@@ -244,29 +252,34 @@ def draw_message_box(stdscr: curses.window, now: float, highlight_word: Optional
     fill_attr = curses.color_pair(box_style.fill_pair)
     if box_style.border_pair != 11:
         fill_attr |= curses.A_DIM
-    for y in range(start_y + 1, start_y + box_height - 1):
-        for x in range(start_x + 1, start_x + box_width - 1):
+    fill_x_start = start_x + (0 if ui_state.screen == "handoff" else 1)
+    fill_x_end = start_x + box_width - (0 if ui_state.screen == "handoff" else 1)
+    fill_y_start = start_y + (0 if ui_state.screen == "handoff" else 1)
+    fill_y_end = start_y + box_height - (0 if ui_state.screen == "handoff" else 1)
+    for y in range(fill_y_start, fill_y_end):
+        for x in range(fill_x_start, fill_x_end):
             safe_addch(stdscr, y, x, " ", fill_attr)
 
-    # Border with box-drawing characters
-    border_top = "┌" + "─" * (box_width - 2) + "┐"
-    border_bottom = "└" + "─" * (box_width - 2) + "┘"
+    # Border with box-drawing characters (skip for handoff screen)
     use_imposter_style = ui_state.screen == "reveal" and is_current_imposter()
     if use_imposter_style:
         border_attr = curses.color_pair(IMPOSTER_STYLE.border_pair) | curses.A_BOLD
         title_attr = curses.color_pair(IMPOSTER_STYLE.text_pair) | curses.A_BOLD
-        body_attr = curses.color_pair(IMPOSTER_STYLE.text_pair) | curses.A_BOLD
+        body_attr = curses.color_pair(IMPOSTER_STYLE.text_pair)
     else:
         border_attr = curses.color_pair(box_style.border_pair) | curses.A_BOLD
         title_attr = curses.color_pair(box_style.text_pair) | curses.A_BOLD
         body_attr = curses.color_pair(box_style.text_pair)
 
-    stdscr.attrset(border_attr)
-    safe_addstr(stdscr, start_y, start_x, border_top, border_attr)
-    for y in range(start_y + 1, start_y + box_height - 1):
-        safe_addstr(stdscr, y, start_x, "│", border_attr)
-        safe_addstr(stdscr, y, start_x + box_width - 1, "│", border_attr)
-    safe_addstr(stdscr, start_y + box_height - 1, start_x, border_bottom, border_attr)
+    if ui_state.screen != "handoff":
+        border_top = "┌" + "─" * (box_width - 2) + "┐"
+        border_bottom = "└" + "─" * (box_width - 2) + "┘"
+        stdscr.attrset(border_attr)
+        safe_addstr(stdscr, start_y, start_x, border_top, border_attr)
+        for y in range(start_y + 1, start_y + box_height - 1):
+            safe_addstr(stdscr, y, start_x, "│", border_attr)
+            safe_addstr(stdscr, y, start_x + box_width - 1, "│", border_attr)
+        safe_addstr(stdscr, start_y + box_height - 1, start_x, border_bottom, border_attr)
 
     title_x = start_x + (box_width - len(message_box.title)) // 2
     stdscr.attrset(title_attr)
@@ -351,6 +364,7 @@ def reset_idle() -> None:
     ui_state.current_player = 0
     ui_state.countdown_until = 0.0
     ui_state.reveal_until = 0.0
+    ui_state.handoff_until = 0.0
     ui_state.random_candidates = []
     ui_state.random_filter = ""
     set_box_style(DEFAULT_STYLE)
@@ -469,7 +483,7 @@ def start_waiting() -> None:
     ui_state.screen = "wait_scroll"
     player_num = ui_state.current_player + 1
     set_box_style(DEFAULT_STYLE)
-    set_message_box_title("Scrollen zum Fortfahren")
+    set_message_box_title("Wischen, um Wort zu erhalten")
     set_message_box_text(f"Spieler {player_num} von {ui_state.player_count}")
 
 
@@ -486,13 +500,21 @@ def start_reveal(now: float) -> None:
         set_message_box_text(ui_state.chosen_word or "mystery")
 
 
+def start_handoff(now: float) -> None:
+    ui_state.screen = "handoff"
+    ui_state.handoff_until = now + 3
+    set_box_style(DEFAULT_STYLE)
+    set_message_box_title("Weitergeben")
+    set_message_box_text("Gebe das Gerät dem nächsten Spieler")
+
+
 def advance_player() -> None:
     ui_state.current_player += 1
     if ui_state.current_player >= ui_state.player_count:
         ui_state.screen = "done"
         set_box_style(DEFAULT_STYLE)
         set_message_box_title("Fertig")
-        set_message_box_text("Zurück zur Moduswahl.")
+        set_message_box_text("Alle bereit – startet das Spiel!")
     else:
         start_waiting()
 
@@ -502,29 +524,41 @@ def prepare_word_and_start() -> None:
         return
     if ui_state.selected_mode.source == "player":
         ui_state.chosen_word = ui_state.word_buffer or "mystery"
+    elif ui_state.selected_mode.source == "random" and ui_state.chosen_word:
+        pass
     elif ui_state.selected_mode.source == "random_simple" and ui_state.chosen_word:
         pass
     else:
         ui_state.chosen_word = choose_word_for_source(ui_state.selected_mode.source)
     ui_state.current_player = 0
     assign_imposter()
-    start_waiting()
+    if ui_state.word_options_count > 1:
+        start_reveal(time.monotonic())
+    else:
+        start_waiting()
 
 
 def start_random_flow() -> None:
-    if ui_state.word_options_count > 0:
-        ui_state.random_candidates = random.sample(
-            WORDS, min(ui_state.word_options_count, len(WORDS))
-        )
-        ui_state.random_filter = ""
-        enter_random_pick()
-    else:
+    if ui_state.word_options_count <= 1:
+        ui_state.chosen_word = choose_word_for_source("random")
         ui_state.random_candidates = []
         ui_state.random_filter = ""
         prepare_word_and_start()
+        return
+
+    ui_state.random_candidates = random.sample(WORDS, min(ui_state.word_options_count, len(WORDS)))
+    ui_state.random_filter = ""
+    enter_random_pick()
 
 
 def start_random_simple() -> None:
+    if ui_state.word_options_count <= 1:
+        ui_state.chosen_word = choose_word_for_source("random")
+        ui_state.simple_candidates = []
+        ui_state.simple_index = 0
+        prepare_word_and_start()
+        return
+
     pool_size = len(WORDS)
     count = ui_state.word_options_count if ui_state.word_options_count > 0 else pool_size
     count = max(1, min(count, pool_size))
@@ -535,7 +569,7 @@ def start_random_simple() -> None:
 
 def enter_random_simple() -> None:
     ui_state.screen = "random_simple"
-    set_box_style(ui_state.selected_mode.style if ui_state.selected_mode else DEFAULT_STYLE)
+    set_box_style(IMPOSTER_STYLE)
     word = ui_state.simple_candidates[ui_state.simple_index] if ui_state.simple_candidates else "..."
     set_message_box_title(word.upper())
     set_message_box_text("runter zum Auswählen")
@@ -591,7 +625,7 @@ def best_random_choice() -> str:
 
 def enter_random_pick() -> None:
     ui_state.screen = "random_pick"
-    set_box_style(ui_state.selected_mode.style if ui_state.selected_mode else DEFAULT_STYLE)
+    set_box_style(IMPOSTER_STYLE)
     top = best_random_choice()
     others = " ".join(ui_state.random_candidates) if ui_state.random_candidates else "keine"
     title = top.upper() if ui_state.random_filter else "Start Typing"
@@ -616,16 +650,29 @@ def lock_random_simple_choice() -> None:
 
 def update_timers(now: float) -> None:
     if ui_state.screen == "reveal" and now >= ui_state.reveal_until:
+        if ui_state.current_player + 1 >= ui_state.player_count:
+            advance_player()
+            ui_state.scroll_block_until = now + 1.0
+        else:
+            start_handoff(now)
+            ui_state.scroll_block_until = now + 1.0
+    elif ui_state.screen == "handoff" and now >= ui_state.handoff_until:
         advance_player()
         ui_state.scroll_block_until = now + 1.0
 
 
 def on_direction(direction: str) -> None:
+    if ui_state.screen == "handoff":
+        return
     if ui_state.screen == "wait_scroll":
         start_reveal(time.monotonic())
         return
     if ui_state.screen == "reveal":
-        advance_player()
+        if ui_state.current_player + 1 >= ui_state.player_count:
+            advance_player()
+        else:
+            start_handoff(time.monotonic())
+            ui_state.scroll_block_until = time.monotonic() + 1.0
         return
     if ui_state.screen == "done":
         enter_modes()
